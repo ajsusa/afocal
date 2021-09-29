@@ -1,0 +1,11 @@
+name: afocal
+channels:
+dependencies:
+  - numpy
+  - matplotlib
+  - jupyter
+  - ipykernel
+  - typing
+  - copy
+  - math
+  - scipy
