@@ -170,6 +170,10 @@ class RaySet(object):
     def max_aberration(self, sets='all', unit='rad', wavelengths=None):
         return np.max(np.abs(self.aberrations(sets=sets, unit=unit, wavelengths=wavelengths)))
 
+    def draw(self, sets='all', c='r', ls='-', marker='', arrow_size=8):
+        for ray in self.rays_of_set(sets):
+            ray.draw(c=c, ls=ls, marker=marker, arrow_size=arrow_size)
+
 
 def _spherical_refraction(Pr, Vr, Q, R, n1, n2, Y_max=None, diag=False):
 
