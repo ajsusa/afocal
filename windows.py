@@ -109,6 +109,10 @@ class CurvedWall(object):
     def inplace(self, inplace):
         return {False: copy.deepcopy(self)}.get(inplace, self)
 
+    def print_dims(self):
+        print(f"Ri =\t{self.Ri:6.3f} cm")
+        print(f"t =\t{self.t_1:6.3f} cm")
+
     def get_n1(self, wavelength=None):
         if wavelength is None:
             return self.n_1
@@ -235,6 +239,11 @@ class Bispherical(CurvedWall):
     @property
     def x_max(self):
         return self.get_Qo('right')[0] + self.Ro
+
+    def print_dims(self):
+        print(f"Ri =\t{self.Ri:6.3f} cm")
+        print(f"Ro =\t{self.Ro:6.3f} cm")
+        print(f"t =\t{self.t_1:6.3f} cm")
 
     def get_Qo(self, side):
         Qo_right = self.Qi + np.array(
@@ -420,3 +429,204 @@ class ZeroPowerSinglet(Bispherical):
         window.trace_ray_set(wavelength=wavelength, n_rays=n_rays, y_range=y_range, draw=False, inplace=True)
 
         return window
+
+
+class CementedDoublet(Bispherical):
+
+    opt_params = ('Rm', 'Ro', 't_base', 't_crown')
+
+    def __init__(self, Ri: float, Rm: float, Ro: float, h: float, t1: float, t2: float,
+                 h_f: float = 0., wetted_material: str = 'fused silica', crown_material: str = 'bk7',
+                 design_wavelength: typing.Union[float, typing.Iterable] = 532, n_o: float = 1,
+                 n_i: float = 1, draw=False, trace=True, n_rays=21, ray_y_range=None, x_start=None,
+                 x_stop=None, dx_extend=None, draw_rays=False):
+        self._Rm = float(Rm)
+        self._t_2 = float(t2)
+        self._material_2 = crown_material
+        # self._opt_params = ('Rm', 'Ro', 't_base', 't_crown')
+        super().__init__(Ri=Ri, Ro=Ro, h=h, t=t1, h_f=h_f, material=wetted_material,
+                         design_wavelength=design_wavelength,
+                         n_o=n_o, n_i=n_i, draw=draw, trace=trace, n_rays=n_rays, ray_y_range=ray_y_range,
+                         x_start=x_start, x_stop=x_stop, dx_extend=dx_extend, draw_rays=draw_rays)
+
+    @property
+    def Rm(self):
+        return self._Rm
+
+    @property
+    def t_2(self):
+        return self._t_2
+
+    @property
+    def material_2(self):
+        return self._material_2
+
+    @property
+    def n_2(self):
+        design_wavelengths = self.design_wavelength
+        if isinstance(design_wavelengths, typing.Iterable):
+            return [refractive_index(self.material_2, wave) for wave in design_wavelengths]
+        else:
+            return refractive_index(self.material_2, design_wavelengths)
+
+    def print_dims(self):
+        print(f"Ri =      {self.Ri:6.3f} cm")
+        print(f"Rm =      {self.Rm:6.3f} cm")
+        print(f"Ro =      {self.Ro:6.3f} cm")
+        print(f"t_base =  {self.t_1:6.3f} cm")
+        print(f"t_crown = {self.t_2:6.3f} cm")
+
+    # def opt_params(self):
+    #     return self._opt_params
+
+    def get_n2(self, wavelength=None):
+        if wavelength is None:
+            return self.n_2
+        return refractive_index(self.material_2, wavelength=wavelength)
+
+    def get_Qo(self, side):
+        # Qo_right = self.get_Qm('right') + np.array([-self.Ro + self.Rm + self.t_2, 0])
+        Qo_right = np.array([-self.Ro + self.Ri + self.t_2 + self.t_1, 0])
+        if side == 'right':
+            return Qo_right
+        elif side == 'left':
+            return Qo_right * np.array([-1, 0])
+
+    def get_Qm(self, side):
+        Qm_right = self.Qi + np.array(
+            [-self.Rm + self.Ri + self.t_1, 0])  # center coordinates of the outer surface; defined for left window
+        if side == 'right':
+            return Qm_right
+        elif side == 'left':
+            return Qm_right * np.array([-1, 0])
+
+    def get_xy_m(self, n_pts=100):
+        # points on middle surface
+        if self.Rm != np.inf:
+            rad_ext_m = math.asin(self.h / 2 / self.Rm)
+            rad_m = np.linspace(-rad_ext_m, rad_ext_m, n_pts).reshape(-1)
+            xm = self.Rm * np.cos(rad_m) - self.get_Qm('left')[0]
+            ym = self.Rm * np.sin(rad_m)
+        else:
+            xm = np.array(2 * [self.Qi[0] - self.Ri - self.t_1])
+            ym = np.array([1, -1]) * (self.h / 2)
+        return xm, ym
+
+    def ray_trace_exterior(self, ray: raytrace.Ray, side, diagnostics=False):
+        print_diag('  Tracing the outer surface', diagnostics)
+        n2 = self.get_n2(ray.wavelength)
+        if side not in ['left', 'right']:
+            pass
+        elif side == 'left':
+            ray.refract_circle(self.Ro, self.get_Qo(side), n2, Y_max=self.Y_max_o, diagnostics=diagnostics)
+        elif side == 'right':
+            ray.refract_circle(self.Ro, self.get_Qo(side), self.n_o, Y_max=self.Y_max_o, diagnostics=diagnostics)
+
+    def ray_trace_middle(self, ray: raytrace.Ray, side='left', diagnostics=False):
+        print_diag('  Tracing the middle surface', diagnostics)
+        if side not in ['left', 'right']:
+            pass
+        elif side == 'left':
+            n1 = self.get_n1(ray.wavelength)
+            if self.Rm != np.inf:
+                ray.refract_circle(self.Rm, self.get_Qm(side), n1, Y_max=self.Y_max_o, diagnostics=diagnostics)
+            else:
+                x = self.Qi[0] - self.Ri - self.t_1
+                ray.refract_plane(x, n1, Y_max=self.Y_max_o, inplace=True)
+        elif side == 'right':
+            n2 = self.get_n2(ray.wavelength)
+            if self.Rm != np.inf:
+                ray.refract_circle(self.Rm, self.get_Qm(side), n2, Y_max=self.Y_max_o, diagnostics=diagnostics)
+            else:
+                x = self.Qi[0] + self.Ri + self.t_1
+                ray.refract_plane(x, n2, Y_max=self.Y_max_o, inplace=True)
+        pass
+
+    def optimize_window(self, metric='rms_aberration', which=4 * (True,), wavelength=None, inplace=True,
+                        n_rays=11, y_range=None, t1_bounds=None, t2_bounds=None, ray_sets='success'):
+
+        err = None
+        window = self.inplace(inplace)
+        which = np.array(which, dtype=np.bool)
+        print_diag(which, False)
+
+        '''
+        Define the optimization (error) function based on array 'p' of parameters, where:
+            p[0] = 1 / Rm  # curvature of mid surface to provide continuity between positive and negative values
+            p[1] = Ro  # outer surface radius
+            p[2] = t1  # wetted element thickness
+            p[3] = t2  # outer element thickness
+        '''
+
+        def set_params(window_, p):
+            i = 0
+            if which[0]:
+                if p[i] != 0:
+                    window_._Rm = 2 / p[i]
+                else:
+                    window_._Rm = np.inf
+                i += 1
+            if which[1]:
+                window_._Ro = p[i]
+                i += 1
+            if which[2]:
+                window_._t_1 = p[i]
+                i += 1
+            if which[3]:
+                window_._t_2 = p[i]
+            try:
+                self.check_fix_geometry()
+            except ValueError:
+                print(self.Rm, self.h)
+                raise Exception()
+
+        if y_range is None:
+            y_range = self.default_Y_range
+
+        if metric == 'rms_aberration':
+            def err(p):
+                set_params(window, p)
+                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+                                            draw=False, inplace=False)
+                return rays.rms_aberration(sets=ray_sets)
+
+        elif metric == 'max_aberration':
+            def err(p):
+                print_diag(p[0], False)
+                set_params(window, p)
+                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+                                            draw=False, inplace=False)
+                return np.max(np.abs(rays.aberrations(sets=ray_sets)))
+
+        else:
+            ValueError(f"'metric' argument must be one of 'rms_aberration' or 'max_aberration'.")
+
+        if t1_bounds is None:
+            t1_bounds = (0.03 * self.h, 0.5 * self.h)
+        if t2_bounds is None:
+            t2_bounds = (0.03 * self.h, 0.5 * self.h)
+
+        p0 = np.array([2 / window.Rm, window.Ro, window.t_1, window.t_2])[which]
+        bounds = [bnd for bnd, w in zip([(-1.8 / self.Y_max_o, 1.8 / self.Y_max_o), (self.Y_max_o, None),
+                                         t1_bounds, t2_bounds], which) if w]
+
+        print_diag(f'p0 =    \t{p0}\nbounds =\t{bounds}', False)
+        print_diag(f'error0 =\t{err(p=p0)}', False)
+
+        sln = minimize(err, p0, jac='2-point', bounds=bounds)
+
+        set_params(window, sln.x)
+        window.trace_ray_set(wavelength=wavelength, n_rays=n_rays, y_range=y_range, draw=False, inplace=True)
+
+        return window
+
+    def check_fix_geometry(self):
+        xi, _ = self.get_xy_i(2)
+        xm, _ = self.get_xy_m(2)
+        xo, _ = self.get_xy_o(2)
+        dx1 = xm[0] - xi[0]
+        dx2 = xo[0] - xm[0]
+        if dx1 < 0:
+            self._t_1 += np.abs(dx1)
+        if dx2 < 0:
+            self._t_2 += np.abs(dx2)
