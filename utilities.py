@@ -3,7 +3,7 @@ import math
 import typing
 import numpy as np
 import matplotlib.pyplot as plt
-
+from IPython import display
 
 # define the dictionary of refractive indices at different wavelengths
 refractive_index_dict = {'fused silica': {400: 1.4701, 450: 1.4656, 500: 1.4623, 550: 1.4599, 600: 1.4580,
@@ -20,6 +20,10 @@ refractive_index_dict = {'fused silica': {400: 1.4701, 450: 1.4656, 500: 1.4623,
                          # Schott flint glass, https://refractiveindex.info/?shelf=glass&book=SCHOTT-F&page=F2
                          'sapphire': {300: 1.8144, 350: 1.7972, 400: 1.7862, 450: 1.7794, 500: 1.7742,
                                       550: 1.7704, 600: 1.7675, 650: 1.7651, 700: 1.7632}}
+
+
+def print_md(string):
+    display.display(display.Markdown(string))
 
 
 def refractive_index(material: str, wavelength: float = None):
@@ -51,7 +55,8 @@ class IntersectionExceedsBounds(Exception):
         self.Pr = Pr
 
 
-def plot_aberrations(rays, unit='rad', failed=True, new_fig=True, c=None, prefix=''):
+def plot_aberrations(rays, unit='rad', failed=True, new_fig=True, c=None, mfc=None, ls=':', prefix='', yloc='in',
+                     flip_axes=False):
     from windows import CurvedWall
     from raytrace import RaySet
     if isinstance(rays, CurvedWall):
@@ -62,16 +67,29 @@ def plot_aberrations(rays, unit='rad', failed=True, new_fig=True, c=None, prefix
     if new_fig:
         plt.figure()
 
-    h = plt.plot(rays.ys_in(sets='success'), rays.aberrations(sets='success', unit=unit), 'o', c=c,
-                 label=prefix + {True: 'Passed Rays', False: ''}[failed])
+    y_pos_func, y_pos_label = {'in': (rays.ys_in, 'Incoming'), 'out': (rays.ys_out, 'Outgoing')}[yloc]
+
+    x, y = (y_pos_func('success'), rays.aberrations(sets='success', unit=unit))[::{True: -1, False: 1}[flip_axes]]
+    h = plt.plot(x, y, 'o', c=c, mfc=mfc, ls=ls, label=prefix + {True: 'Passed Rays', False: ''}[failed])
 
     if failed:
         if c is None:
             c = h[0].get_color()
-        plt.plot(rays.ys_in(sets='failed'), rays.aberrations(unit=unit, sets='failed'), 'o', c=c, mfc='w',
-                 label=prefix+'Failed Rays')
+        x, y = (y_pos_func('failed'), rays.aberrations(sets='failed', unit=unit))[::{True: -1, False: 1}[flip_axes]]
+        plt.plot(x, y, 'o', c=c, mfc='w', ls='', label=prefix+'Failed Rays')
 
-    plt.ylabel(f'Angular Aberration ({unit})')
-    plt.xlabel('Incoming Y-Position (cm)')
+    x, y = (y_pos_label + ' Y-Position (cm)', f'Angular Aberration ({unit})')[::{True: -1, False: 1}[flip_axes]]
+    plt.ylabel(y)
+    plt.xlabel(x)
 
     plt.legend()
+
+
+def ray_aberration_subplots():
+    fig, axs = plt.subplots(1, 2, gridspec_kw={'width_ratios': [2, 1]}, figsize=(10, 4), sharey='row')
+    plt.subplots_adjust(wspace=0)
+
+    axs[1].yaxis.set_label_position("right")
+    axs[1].axvline(0, ls=':', c='k')
+
+    return fig, axs

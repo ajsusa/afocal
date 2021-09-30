@@ -277,22 +277,9 @@ class Bispherical(CurvedWall):
 
     def draw(self, which='both', n_pts=100, center_circle=False, ls='-', c='k', lw=2,
              new_figure=True, figsize=(10, 5)):
-        # # points on inner surface
-        # rad_ext_i = math.asin((self.h / 2 - self.h_f) / self.Ri)
-        # rad_i = np.linspace(-rad_ext_i, rad_ext_i, n_pts).reshape(-1)
-        # xi = self.Ri * np.cos(rad_i)
-        # yi = self.Ri * np.sin(rad_i)
+
         xi, yi = self.get_xy_i(n_pts)
-
-        # # points on outer surface
-        # rad_ext_o = math.asin(self.h / 2 / self.Ro)
-        # rad_o = np.linspace(-rad_ext_o, rad_ext_o, n_pts).reshape(-1)
-        # # xo = self.Ro * np.cos(rad_o) - self.Ro + self.Ri + self.t
-        # xo = self.Ro * np.cos(rad_o) - self.get_Qo('left')[0]
-        # yo = self.Ro * np.sin(rad_o)
         xo, yo = self.get_xy_o(n_pts)
-
-        # points on mid surface
         xm, ym = self.get_xy_m(n_pts)
 
         if new_figure:
@@ -306,6 +293,10 @@ class Bispherical(CurvedWall):
             self._draw_window(-xi, yi, -xo, yo, -xm, ym, ls=ls, c=c, lw=lw)
         if which in ['right', 'both']:
             self._draw_window(xi, yi, xo, yo, xm, ym, ls=ls, c=c, lw=lw)
+
+    def draw_rays(self, sets='all', c='r', ls='-', marker='', arrow_size=8):
+        for ray in self.rays.rays_of_set(sets):
+            ray.draw(c=c, ls=ls, marker=marker, arrow_size=arrow_size)
 
     def check_fix_geometry(self):
         xi, _ = self.get_xy_i(2)
@@ -338,3 +329,94 @@ class Concentric(Bispherical):
         super().__init__(Ri, Ro, h, t, h_f=h_f, material=material, design_wavelength=design_wavelength,
                          n_o=n_o, n_i=n_i, draw=draw, trace=trace, n_rays=n_rays, ray_y_range=ray_y_range,
                          x_start=x_start, x_stop=x_stop, dx_extend=dx_extend, draw_rays=draw_rays)
+
+    def draw_annulus(self, c='k', ls='-', lw=1.5):
+        for R in self.Ri, self.Ro:
+            plt.gca().add_patch(plt.Circle((0, 0), R, ec=c, ls=ls, lw=lw, fill=False))
+        plt.axis('equal')
+
+
+class ZeroPowerSinglet(Bispherical):
+    def __init__(self, Ri: float, h: float, t: float, Ro='analytical', h_f: float = 0., material: str = 'fused_silica',
+                 design_wavelength: float = 532, n_o: float = 1, n_i: float = 1, draw=False, trace=True,
+                 n_rays=21, ray_y_range=None, x_start=None, x_stop=None, dx_extend=None, draw_rays=False):
+        n1 = refractive_index(material, design_wavelength)
+        metric = None
+        if isinstance(Ro, str):
+            if Ro == 'analytical':
+                Ro = ZeroPowerSinglet.Ro_analytical(Ri, t, n1, n_i=n_i, n_o=n_o)
+            elif Ro in ['max_aberration', 'rms_aberration']:
+                metric, Ro = Ro, Ri + t
+            else:
+                raise ValueError(f"Ro argument must be numeric radius or one of 'analytical', 'max_aberration',"
+                                 f" or 'rms_aberration'.")
+
+        super().__init__(Ri, Ro, h, t, h_f=h_f, material=material, design_wavelength=design_wavelength,
+                         n_o=n_o, n_i=n_i, draw=draw, trace=trace, n_rays=n_rays, ray_y_range=ray_y_range,
+                         x_start=x_start, x_stop=x_stop, dx_extend=dx_extend, draw_rays=draw_rays)
+
+        if metric in ['max_aberration', 'rms_aberration']:
+            self.optimize_Ro(metric=Ro, inplace=True, n_rays=n_rays, y_range=ray_y_range)
+
+    @classmethod
+    def Ro_analytical(cls, Ri, t, n1, n_i=1., n_o=1.):
+        # return (n1 - 1) * (n1 * Ri - (n_o - n1) * t) / ((n1 - n_o) * n1)  # Vikram form
+        return Ri * ((n1 - n_o) / (n1 - n_i)) * (n1 * Ri + (n1 - n_i) * t) / (n1 * Ri)
+
+    @classmethod
+    def Ro_rms_aberration(cls, Ri, t, n1, n_i=1., n_o=1.):
+        # TODO: implement Ro based on minimum rms aberration
+        return None
+
+    @classmethod
+    def Ro_max_aberration(cls, Ri, t, n1, n_i=1., n_o=1.):
+        # TODO: implement Ro based on minimum rms aberration
+        return None
+
+    def optimize_Ro(self, metric, wavelength=None, inplace=True, n_rays=21, y_range=None,
+                    Ro_guess=None, ray_sets='success'):
+        err = None
+
+        window = self.inplace(inplace)
+        if Ro_guess is not None:
+            window._Ro = Ro_guess
+
+        if metric == 'analytical':
+            Ro = ZeroPowerSinglet.Ro_analytical(window.Ri, window.t, window.n_1, window.n_i, window.n_o)
+            window._Ro = Ro
+            window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+                                 draw=False, inplace=True)
+            return window
+
+        if metric == 'rms_aberration':
+            if Ro_guess is None:
+                window._Ro = window.optimize_Ro('analytical', inplace=False).Ro
+
+            def err(p):
+                window._Ro = p[0]
+                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+                                            draw=False, inplace=False)
+                return rays.rms_aberration(sets=ray_sets)
+
+        elif metric == 'max_aberration':
+            print_diag('Solving as "max_aberration" problem.', False)
+            if Ro_guess is None:
+                window._Ro = (window.optimize_Ro('analytical', inplace=False).Ro +
+                              window.optimize_Ro('rms_aberration', inplace=False).Ro) / 2
+
+            def err(p):
+                print_diag(p[0], False)
+                window._Ro = p[0]
+                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+                                            draw=False, inplace=False)
+                return np.max(np.abs(rays.aberrations(sets=ray_sets)))
+
+        else:
+            ValueError(f"'metric' argument must be one of 'analytical', 'rms_aberration', or 'max_aberration'.")
+
+        sln = minimize(err, np.array([window.Ro]), jac='2-point')
+
+        window._Ro = sln.x[0]
+        window.trace_ray_set(wavelength=wavelength, n_rays=n_rays, y_range=y_range, draw=False, inplace=True)
+
+        return window
