@@ -55,6 +55,12 @@ class IntersectionExceedsBounds(Exception):
         self.Pr = Pr
 
 
+class NegativeIntersectionDistances(Exception):
+    def __init__(self, message, Prs=()):
+        self.message = message
+        self.Prs = Prs
+
+
 def plot_aberrations(rays, unit='rad', failed=True, new_fig=True, c=None, mfc=None, ls=':', prefix='', yloc='in',
                      flip_axes=False):
     from windows import CurvedWall
