@@ -84,7 +84,7 @@ def plot_aberrations(rays, unit='rad', failed=True, new_fig=True, c=None, mfc=No
         x, y = (y_pos_func('failed'), rays.aberrations(sets='failed', unit=unit))[::{True: -1, False: 1}[flip_axes]]
         plt.plot(x, y, 'o', c=c, mfc='w', ls='', label=prefix+'Failed Rays')
 
-    x, y = (y_pos_label + ' Y-Position (cm)', f'Angular Aberration ({unit})')[::{True: -1, False: 1}[flip_axes]]
+    x, y = (y_pos_label + ' Y-Position (cm)', f'Aberration ({unit})')[::{True: -1, False: 1}[flip_axes]]
     plt.ylabel(y)
     plt.xlabel(x)
 
@@ -92,7 +92,7 @@ def plot_aberrations(rays, unit='rad', failed=True, new_fig=True, c=None, mfc=No
 
 
 def ray_aberration_subplots():
-    fig, axs = plt.subplots(1, 2, gridspec_kw={'width_ratios': [2, 1]}, figsize=(10, 4), sharey='row')
+    fig, axs = plt.subplots(1, 2, gridspec_kw={'width_ratios': [3, 1]}, figsize=(10, 4), sharey='row')
     plt.subplots_adjust(wspace=0)
 
     axs[1].yaxis.set_label_position("right")
