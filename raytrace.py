@@ -4,7 +4,7 @@ import copy
 import numpy as np
 import matplotlib.pyplot as plt
 
-from utilities import print_diag, IntersectionExceedsBounds
+from utilities import print_diag, IntersectionExceedsBounds, NegativeIntersectionDistances
 
 
 class Ray(object):
@@ -240,9 +240,13 @@ def _spherical_intersection(Pr, Vr, Q, R, Y_max=None, tol=1e-3):
     elif t2 > tol:
         t = t2
     else:
-        raise Exception(f'Error detecting next intersection:\n'
-                        f'\tDistances = ({t1}, {t2})\n'
-                        f'\tTolerance = {tol}')
+        Prs = (Pr + t1 * Vr, Pr + t2 * Vr)
+        raise NegativeIntersectionDistances(f'Error detecting next intersection:\n'
+                                            f'\tDistances = ({t1}, {t2})\n'
+                                            f'\tTolerance = {tol}', Prs=Prs)
+        # raise Exception(f'Error detecting next intersection:\n'
+        #                 f'\tDistances = ({t1}, {t2})\n'
+        #                 f'\tTolerance = {tol}')
 
     P_int = Pr + t * Vr
 

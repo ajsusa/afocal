@@ -5,14 +5,40 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 
-from utilities import print_diag, refractive_index
+from utilities import print_diag, print_md, refractive_index, NegativeIntersectionDistances
 import raytrace
+
+_n_o = 1.
+_n_i = 1.
+
+
+def set_n_o(n):
+    if n >= 1.:
+        global _n_o
+        _n_o = float(n)
+
+
+def set_n_i(n):
+    if n >= 1.:
+        global _n_i
+        _n_i = float(n)
+
+
+def check_no_ni(n_o, n_i):
+    if n_o is None:
+        global _n_o
+        n_o = _n_o
+    if n_i is None:
+        global _n_i
+        n_i = _n_i
+    return n_o, n_i
 
 
 class CurvedWall(object):
     def __init__(self, Ri: float, h: float, t: float, h_f: float = 0., material: str = 'fused_silica',
-                 design_wavelength: typing.Union[typing.SupportsFloat, typing.Iterable] = 532,
-                 n_o: typing.SupportsFloat = 1, n_i: typing.SupportsFloat = 1):
+                 design_wavelength: typing.Union[float, typing.Iterable] = 532,
+                 n_o: float = None, n_i: float = None):
+        n_o, n_i = check_no_ni(n_o, n_i)
         self._Ri = float(Ri)
         self._h = float(h)
         self._t_1 = float(t)
@@ -109,9 +135,15 @@ class CurvedWall(object):
     def inplace(self, inplace):
         return {False: copy.deepcopy(self)}.get(inplace, self)
 
-    def print_dims(self):
-        print(f"Ri =\t{self.Ri:6.3f} cm")
-        print(f"t =\t{self.t_1:6.3f} cm")
+    def print_dims(self, prefix=''):
+        print(prefix + f"Ri =\t{self.Ri:6.3f} cm")
+        print(prefix + f"t =\t{self.t_1:6.3f} cm")
+
+    def draw(self, which='both', n_pts=100, center_circle=True, ls='-', c='k', lw=2, new_figure=True, figsize=(10, 5)):
+        pass
+
+    def draw_annulus(self, c='k', ls='-', lw=1.5):
+        pass
 
     def get_n1(self, wavelength=None):
         if wavelength is None:
@@ -197,7 +229,18 @@ class CurvedWall(object):
         for wave in wavelength:
             for y in ys_in:
                 ray = raytrace.Ray((x_start, y), wave, self.n_o, c=color)
-                self.ray_trace_windows(ray, x_stop=x_stop, dx_extend=dx_extend, diagnostics=diagnostics)
+                try:
+                    self.ray_trace_windows(ray, x_stop=x_stop, dx_extend=dx_extend, diagnostics=diagnostics)
+                except NegativeIntersectionDistances as err:
+                    if ray.success:
+                        self.draw()
+                        if self.rays is not None:
+                            [r.draw(c='g', ls='-', marker='.', arrow_size=0) for r in self.rays.rays_of_set('all')]
+                        ray.draw(c='r', ls=':', marker='.', arrow_size=0)
+                        for Pr in err.Prs:
+                            plt.plot(Pr[0], Pr[1], 'or')
+                        raise err
+
                 if draw:
                     ray.draw(ls=linestyle, marker=marker, arrow_size=arrow_size)
                 ray_set.add_ray(ray)
@@ -207,15 +250,20 @@ class CurvedWall(object):
 
         return ray_set
 
+    def draw_rays(self, sets='all', c='r', ls='-', marker='', arrow_size=8):
+        for ray in self.rays.rays_of_set(sets):
+            ray.draw(c=c, ls=ls, marker=marker, arrow_size=arrow_size)
+
 
 class Bispherical(CurvedWall):
     def __init__(self, Ri: float, Ro: float, h: float,
                  t: float, h_f: float = 0., material: str = 'fused_silica',
                  design_wavelength: typing.Union[float, typing.Iterable] = 532,
-                 n_o: float = 1., n_i: float = 1., draw=False, trace=True, n_rays=21,
+                 n_o: float = None, n_i: float = None, draw=False, trace=True, n_rays=21,
                  ray_y_range=None, x_start=None, x_stop=None, dx_extend=None, draw_rays=False):
         super().__init__(Ri, h, t, h_f, material, design_wavelength, n_o, n_i)
         self._Ro = Ro
+        self.check_fix_geometry()
         if draw:
             self.draw()
         if trace:
@@ -240,10 +288,10 @@ class Bispherical(CurvedWall):
     def x_max(self):
         return self.get_Qo('right')[0] + self.Ro
 
-    def print_dims(self):
-        print(f"Ri =\t{self.Ri:6.3f} cm")
-        print(f"Ro =\t{self.Ro:6.3f} cm")
-        print(f"t =\t{self.t_1:6.3f} cm")
+    def print_dims(self, prefix=''):
+        print(prefix + f"Ri =\t{self.Ri:6.3f} cm")
+        print(prefix + f"Ro =\t{self.Ro:6.3f} cm")
+        print(prefix + f"t =\t{self.t_1:6.3f} cm")
 
     def get_Qo(self, side):
         Qo_right = self.Qi + np.array(
@@ -278,6 +326,13 @@ class Bispherical(CurvedWall):
         xo = np.array(self.Ro * np.cos(rad_o) - self.get_Qo('left')[0])
         yo = np.array(self.Ro * np.sin(rad_o))
         return xo, yo
+
+    def check_fix_geometry(self):
+        xi, _ = self.get_xy_i(2)
+        xo, _ = self.get_xy_o(2)
+        dx = xo[0] - xi[0]
+        if dx < 0:
+            self._t_1 += np.abs(dx)
 
     @staticmethod
     def get_xy_m(_):
@@ -326,18 +381,19 @@ class Bispherical(CurvedWall):
 
 
 class Concentric(Bispherical):
-    @property
-    def Ro(self):
-        return self.Ri + self.t
 
     def __init__(self, Ri: float, h: float, t: float, h_f: float = 0., material: str = 'fused_silica',
                  design_wavelength: typing.Union[float, typing.Iterable] = 532,
-                 n_o: float = 1, n_i: float = 1, draw=False, trace=True, n_rays=21, ray_y_range=None,
+                 n_o: float = None, n_i: float = None, draw=False, trace=True, n_rays=21, ray_y_range=None,
                  x_start=None, x_stop=None, dx_extend=None, draw_rays=False):
         Ro = Ri + t
         super().__init__(Ri, Ro, h, t, h_f=h_f, material=material, design_wavelength=design_wavelength,
                          n_o=n_o, n_i=n_i, draw=draw, trace=trace, n_rays=n_rays, ray_y_range=ray_y_range,
                          x_start=x_start, x_stop=x_stop, dx_extend=dx_extend, draw_rays=draw_rays)
+
+    @property
+    def Ro(self):
+        return self.Ri + self.t
 
     def draw_annulus(self, c='k', ls='-', lw=1.5):
         for R in self.Ri, self.Ro:
@@ -347,9 +403,10 @@ class Concentric(Bispherical):
 
 class ZeroPowerSinglet(Bispherical):
     def __init__(self, Ri: float, h: float, t: float, Ro='analytical', h_f: float = 0., material: str = 'fused_silica',
-                 design_wavelength: float = 532, n_o: float = 1, n_i: float = 1, draw=False, trace=True,
+                 design_wavelength: float = 532, n_o: float = None, n_i: float = None, draw=False, trace=True,
                  n_rays=21, ray_y_range=None, x_start=None, x_stop=None, dx_extend=None, draw_rays=False):
         n1 = refractive_index(material, design_wavelength)
+        n_o, n_i = check_no_ni(n_o, n_i)
         metric = None
         if isinstance(Ro, str):
             if Ro == 'analytical':
@@ -437,8 +494,8 @@ class CementedDoublet(Bispherical):
 
     def __init__(self, Ri: float, Rm: float, Ro: float, h: float, t1: float, t2: float,
                  h_f: float = 0., wetted_material: str = 'fused silica', crown_material: str = 'bk7',
-                 design_wavelength: typing.Union[float, typing.Iterable] = 532, n_o: float = 1,
-                 n_i: float = 1, draw=False, trace=True, n_rays=21, ray_y_range=None, x_start=None,
+                 design_wavelength: typing.Union[float, typing.Iterable] = 532, n_o: float = None, n_i: float = None,
+                 draw=False, trace=True, n_rays=21, ray_y_range=None, x_start=None,
                  x_stop=None, dx_extend=None, draw_rays=False):
         self._Rm = float(Rm)
         self._t_2 = float(t2)
@@ -469,12 +526,12 @@ class CementedDoublet(Bispherical):
         else:
             return refractive_index(self.material_2, design_wavelengths)
 
-    def print_dims(self):
-        print(f"Ri =      {self.Ri:6.3f} cm")
-        print(f"Rm =      {self.Rm:6.3f} cm")
-        print(f"Ro =      {self.Ro:6.3f} cm")
-        print(f"t_base =  {self.t_1:6.3f} cm")
-        print(f"t_crown = {self.t_2:6.3f} cm")
+    def print_dims(self, prefix=''):
+        print(prefix + f"Ri =      {self.Ri:6.3f} cm")
+        print(prefix + f"Rm =      {self.Rm:6.3f} cm")
+        print(prefix + f"Ro =      {self.Ro:6.3f} cm")
+        print(prefix + f"t_base =  {self.t_1:6.3f} cm")
+        print(prefix + f"t_crown = {self.t_2:6.3f} cm")
 
     # def opt_params(self):
     #     return self._opt_params
@@ -544,6 +601,278 @@ class CementedDoublet(Bispherical):
 
     def optimize_window(self, metric='rms_aberration', which=4 * (True,), wavelength=None, inplace=True,
                         n_rays=11, y_range=None, t1_bounds=None, t2_bounds=None, ray_sets='success'):
+
+        err = None
+        window = self.inplace(inplace)
+        which = np.array(which, dtype=np.bool)
+        print_diag(which, False)
+
+        '''
+        Define the optimization (error) function based on array 'p' of parameters, where:
+            p[0] = 1 / Rm  # curvature of mid surface to provide continuity between positive and negative values
+            p[1] = Ro  # outer surface radius
+            p[2] = t1  # wetted element thickness
+            p[3] = t2  # outer element thickness
+        '''
+
+        def set_params(window_, p):
+            i = 0
+            if which[0]:
+                if p[i] != 0:
+                    window_._Rm = 2 / p[i]
+                else:
+                    window_._Rm = np.inf
+                i += 1
+            if which[1]:
+                window_._Ro = p[i]
+                i += 1
+            if which[2]:
+                window_._t_1 = p[i]
+                i += 1
+            if which[3]:
+                window_._t_2 = p[i]
+            try:
+                self.check_fix_geometry()
+            except ValueError:
+                print(self.Rm, self.h)
+                raise Exception()
+
+        if y_range is None:
+            y_range = self.default_Y_range
+
+        if metric == 'rms_aberration':
+            def err(p):
+                set_params(window, p)
+                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+                                            draw=False, inplace=False)
+                return rays.rms_aberration(sets=ray_sets)
+
+        elif metric == 'max_aberration':
+            def err(p):
+                print_diag(p[0], False)
+                set_params(window, p)
+                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+                                            draw=False, inplace=False)
+                return np.max(np.abs(rays.aberrations(sets=ray_sets)))
+
+        else:
+            ValueError(f"'metric' argument must be one of 'rms_aberration' or 'max_aberration'.")
+
+        if t1_bounds is None:
+            t1_bounds = (0.03 * self.h, 0.5 * self.h)
+        if t2_bounds is None:
+            t2_bounds = (0.03 * self.h, 0.5 * self.h)
+
+        p0 = np.array([2 / window.Rm, window.Ro, window.t_1, window.t_2])[which]
+        bounds = [bnd for bnd, w in zip([(-1.8 / self.Y_max_o, 1.8 / self.Y_max_o), (self.Y_max_o, None),
+                                         t1_bounds, t2_bounds], which) if w]
+
+        print_diag(f'p0 =    \t{p0}\nbounds =\t{bounds}', False)
+        print_diag(f'error0 =\t{err(p=p0)}', False)
+
+        sln = minimize(err, p0, jac='2-point', bounds=bounds)
+
+        set_params(window, sln.x)
+        window.trace_ray_set(wavelength=wavelength, n_rays=n_rays, y_range=y_range, draw=False, inplace=True)
+
+        return window
+
+    def check_fix_geometry(self):
+        xi, _ = self.get_xy_i(2)
+        xm, _ = self.get_xy_m(2)
+        xo, _ = self.get_xy_o(2)
+        dx1 = xm[0] - xi[0]
+        dx2 = xo[0] - xm[0]
+        if dx1 < 0:
+            self._t_1 += np.abs(dx1)
+        if dx2 < 0:
+            self._t_2 += np.abs(dx2)
+
+
+class BisphericalLens(Bispherical):
+    def __init__(self, Ri: float, Ro: float, h: float, t: float, xi: float,
+                 h_f: float = 0., material: str = 'fused silica',
+                 design_wavelength: typing.Union[float, typing.Iterable] = 532,
+                 n_o: float = 1., n_i: float = 1., draw=False, trace=False, n_rays=21,
+                 ray_y_range=None, x_start=None, x_stop=None, dx_extend=None, draw_rays=False):
+        self._xi = xi
+        super().__init__(Ri, Ro, h, t, h_f, material, design_wavelength, n_o, n_i, trace=False)
+        if draw:
+            self.draw()
+        if trace:
+            if ray_y_range is None:
+                ray_y_range = self.default_Y_range
+            self.trace_ray_set(design_wavelength, n_rays=n_rays, y_range=ray_y_range,
+                               x_stop=x_stop, dx_extend=dx_extend, x_start=x_start, draw=draw_rays)
+
+    @property
+    def Qi(self):
+        raise ValueError('Property "Qi" undefined for BisphericalLens class')
+
+    @property
+    def xi(self):
+        return self._xi
+
+    def get_Qi(self, side):
+        Qi_right = np.array([np.abs(self.xi) - self.Ri, 0])  # center coordinates of inner surface
+        if side == 'right':
+            return Qi_right
+        elif side == 'left':
+            return Qi_right * np.array([-1, 0])
+
+    def get_Qo(self, side):
+        Qo_right = np.array([np.abs(self.xi) + self.t - self.Ro, 0])  # center coordinates of the outer surface
+        if side == 'right':
+            return Qo_right
+        elif side == 'left':
+            return Qo_right * np.array([-1, 0])
+
+    def ray_trace_interior(self, ray: raytrace.Ray, side: str = 'left', diagnostics=False):
+        print_diag('  Tracing the inner surface', diagnostics)
+        n1 = self.get_n1(ray.wavelength)
+        if side not in ['left', 'right']:
+            raise ValueError('"side" must be one of "left" or "right"')
+        elif side == 'left':
+            ray.refract_circle(self.Ri, self.get_Qi(side), self.n_o, Y_max=self.Y_max_i, diagnostics=diagnostics)
+        elif side == 'right':
+            ray.refract_circle(self.Ri, self.get_Qi(side), n1, Y_max=self.Y_max_i, diagnostics=diagnostics)
+
+    def get_xy_i(self, n_pts=100):
+        # points on inner surface
+        rad_ext_i = math.asin((self.h / 2 - self.h_f) / self.Ri)
+        rad_i = np.linspace(-rad_ext_i, rad_ext_i, n_pts).reshape(-1)
+        xi = self.Ri * np.cos(rad_i) - self.get_Qi('left')[0]
+        yi = self.Ri * np.sin(rad_i)
+        return xi, yi
+
+    def get_xy_o(self, n_pts=100):
+        # points on outer surface
+        rad_ext_o = math.asin(self.h / 2 / self.Ro)
+        rad_o = np.linspace(-rad_ext_o, rad_ext_o, n_pts).reshape(-1)
+        xo = self.Ro * np.cos(rad_o) - self.get_Qo('left')[0]
+        yo = self.Ro * np.sin(rad_o)
+        return xo, yo
+
+    # def draw(self, which='both', n_pts=100, center_circle=False, ls='-', c='k', lw=2,
+    #          new_figure=True, figsize=(10, 5)):
+    #     xi, yi = self.get_xy_i(n_pts)
+    #
+    #     xo, yo = self.get_xy_o(n_pts)
+    #
+    #     # points on mid surface
+    #     xm, ym = self.get_xy_m(n_pts)
+    #
+    #     if new_figure:
+    #         plt.figure(figsize=figsize)
+    #         plt.axis('equal')
+    #     if center_circle:
+    #         circle = plt.Circle((0, 0), self.Ri, ec=c, ls=':', lw=lw * .75, fill=False)
+    #         plt.gca().add_patch(circle)
+    #
+    #     if which in ['left', 'both']:
+    #         _draw_window(-xi, yi, -xo, yo, -xm, ym, ls=ls, c=c, lw=lw)
+    #     if which in ['right', 'both']:
+    #         _draw_window(xi, yi, xo, yo, xm, ym, ls=ls, c=c, lw=lw)
+
+    def check_fix_geometry(self):
+        xi, _ = self.get_xy_i(2)
+        xo, _ = self.get_xy_o(2)
+        dx = xo[0] - xi[0]
+        if dx < 0:
+            self._t_1 += np.abs(dx)
+
+
+class AirspaceDoublet(CurvedWall):
+
+    opt_params = ('Ro', 't_base', 'R_lens_i', 'R_lens_o', 't_lens', 'x_air')
+
+    def __init__(self, window: CurvedWall, lens: BisphericalLens,
+                 design_wavelength: typing.Union[float, typing.Iterable] = None):
+        # , Ri: float, Rm: float, Ro: float, h: float, t1: float, t2: float,
+        #  h_f: float = 0., wetted_material: str = 'fused silica', crown_material: str = 'bk7',
+        #  design_wavelength: typing.Union[float, typing.Iterable] = 532, n_o: float = None, n_i: float = None,
+        #  draw=False, trace=True, n_rays=21, ray_y_range=None, x_start=None,
+        #  x_stop=None, dx_extend=None, draw_rays=False):
+        if design_wavelength is None:
+            design_wavelength = window.design_wavelength
+        window._design_wavelength = design_wavelength
+        lens._design_wavelength = design_wavelength
+        super().__init__(0., 0., 0., 0., design_wavelength=design_wavelength)
+        self._window = window
+        self._lens = lens
+
+        # self._Rm = float(Rm)
+        # self._t_2 = float(t2)
+        # self._material_2 = crown_material
+        #
+        # super().__init__(Ri=Ri, Ro=Ro, h=h, t=t1, h_f=h_f, material=wetted_material,
+        #                  design_wavelength=design_wavelength,
+        #                  n_o=n_o, n_i=n_i, draw=draw, trace=trace, n_rays=n_rays, ray_y_range=ray_y_range,
+        #                  x_start=x_start, x_stop=x_stop, dx_extend=dx_extend, draw_rays=draw_rays)
+
+    @property
+    def window(self):
+        return self._window
+
+    @property
+    def lens(self):
+        return self._lens
+
+    @property
+    def x_min(self):
+        return self.lens.x_min
+
+    @property
+    def x_max(self):
+        return self.lens.x_max
+
+    @property
+    def x_airgap(self):
+        return self.lens.xi - self.window.x_max
+
+    @property
+    def estimated_Y_max_in(self):
+        wave = self.design_wavelength
+        if isinstance(wave, typing.Iterable):
+            wave = list(wave)[0]
+        ray = raytrace.Ray([0, self.window.h / 2. - self.window.h_f], wave, self.window.n_i)
+        self.ray_trace_window(ray, 'right')
+        return ray.Pr[1]
+
+    def draw(self, which='both', n_pts=100, center_circle=True, ls='-', c='k', lw=2, new_figure=True, figsize=(10, 5)):
+
+        self.lens.draw(which=which, n_pts=n_pts, center_circle=False, ls=ls, c=c, lw=lw, new_figure=new_figure,
+                       figsize=figsize)
+        if isinstance(self.window, Concentric):
+            self.window.draw_annulus(ls=':')
+            # plt.ylim(self.window.Ri * np.array([-1.1, 1.1]))
+        self.window.draw(which=which, n_pts=n_pts, center_circle=center_circle, ls=ls, c=c, lw=lw, new_figure=False)
+
+    def ray_trace_functions(self, side: str = 'left'):
+        funcs = self.lens.ray_trace_window, self.window.ray_trace_window
+        if side == 'left':
+            return funcs
+        elif side == 'right':
+            return funcs[::-1]
+
+    def print_dims(self, prefix: str = ''):
+        print_md(f'_{str(type(self.window)).split(".")[-1][:-2]} Window:_')
+        self.window.print_dims(prefix)
+        print_md(f'_{str(type(self.lens)).split(".")[-1][:-2].split("Lens")[0]} Lens:_')
+        self.lens.print_dims(prefix)
+        print('\n' + f'x_airgap =\t{self.x_airgap:6.3f} cm')
+
+    # def print_dims(self):
+    #     print(f"Ri =      {self.Ri:6.3f} cm")
+    #     print(f"Rm =      {self.Rm:6.3f} cm")
+    #     print(f"Ro =      {self.Ro:6.3f} cm")
+    #     print(f"t_base =  {self.t_1:6.3f} cm")
+    #     print(f"t_crown = {self.t_2:6.3f} cm")
+
+
+
+    def optimize(self, metric='rms_aberration', which=4 * (True,), wavelength=None, inplace=True,
+                 n_rays=11, y_range=None, t1_bounds=None, t2_bounds=None, ray_sets='success'):
 
         err = None
         window = self.inplace(inplace)
