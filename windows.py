@@ -4,12 +4,22 @@ import copy
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
+from typing import Union, Sequence
 
-from utilities import print_diag, print_md, refractive_index, NegativeIntersectionDistances
+from utilities import print_diag, print_md, refractive_index, NegativeIntersectionDistances, NoIntersection
 import raytrace
 
 _n_o = 1.
 _n_i = 1.
+
+_length_unit = 'cm'
+_power_unit = '1/m'
+
+
+def power_mult(P_unit=None):
+    if P_unit is None:
+        P_unit = _power_unit
+    return {'1/cm': 1., '1/m': 100.}[P_unit]
 
 
 def set_n_o(n):
@@ -51,6 +61,8 @@ class CurvedWall(object):
         self._n_o = float(n_o)
         self._n_i = float(n_i)
         self._rays = None
+        self._optimization_parameters = None
+        self._optimization_metric = None
 
     @property
     def Ri(self):
@@ -107,6 +119,14 @@ class CurvedWall(object):
         return 0
 
     @property
+    def default_x_start(self):
+        return -1.1 * abs(self.x_min)
+
+    @property
+    def default_x_stop(self):
+        return 1.1 * abs(self.x_max)
+
+    @property
     def rays(self):
         return self._rays
 
@@ -132,12 +152,52 @@ class CurvedWall(object):
         y0 = self.estimated_Y_max_in
         return -y0, y0
 
+    @property
+    def optimization_metric(self):
+        return self._optimization_metric
+
+    @optimization_metric.setter
+    def optimization_metric(self, metric):
+        raise NotImplementedError(f'Optimization not implemented for window of type "{type(self)}"')
+
+    @property
+    def optimization_parameters(self):
+        if self._optimization_parameters is None:
+            return self.default_optimization_parameters
+        return self._optimization_parameters
+
+    @optimization_parameters.setter
+    def optimization_parameters(self, parameters):
+        if parameters is None:
+            parameters = self.optimization_parameters
+        if all([p in self.all_optimization_parameters for p in parameters]):
+            self._optimization_parameters = parameters
+        else:
+            bad_params = [p for p in parameters if p not in self.all_optimization_parameters]
+            raise ValueError(f'"optimization_parameters" {bad_params} not in valid set'
+                             f' {self.all_optimization_parameters}')
+
+    @property
+    def default_optimization_parameters(self):
+        return None
+
+    @property
+    def all_optimization_parameters(self):
+        return None
+
+    @property
+    def default_bounds(self):
+        return {'Rm': (-1.8 / self.Y_max_o, 1.8 / self.Y_max_o),
+                'Ro': (-1.8 / self.Y_max_o, 1.8 / self.Y_max_o),
+                't_1': {self.h / 20., None},
+                't_2': (self.h / 20., None)}
+
     def inplace(self, inplace):
         return {False: copy.deepcopy(self)}.get(inplace, self)
 
     def print_dims(self, prefix=''):
-        print(prefix + f"Ri =\t{self.Ri:6.3f} cm")
-        print(prefix + f"t =\t{self.t_1:6.3f} cm")
+        print(prefix + f"Ri =\t{self.Ri:6.3f} {_length_unit}")
+        print(prefix + f"t =\t{self.t_1:6.3f} {_length_unit}")
 
     def draw(self, which='both', n_pts=100, center_circle=True, ls='-', c='k', lw=2, new_figure=True, figsize=(10, 5)):
         pass
@@ -178,24 +238,32 @@ class CurvedWall(object):
         # placeholder to be replaced with spherical or ashperical surface
         pass
 
-    def ray_trace_window(self, ray: raytrace.Ray, side, diagnostics=False):
+    def ray_trace_window(self, ray: raytrace.Ray, side, diagnostics=False, pass_error=True):
         if side not in ['left', 'right']:
             raise ValueError('"Side" must be one of "left" or "right".')
         else:
             print_diag(f'Tracing the {side} window', diagnostics)
             trace_functions = self.ray_trace_functions(side)
             for f in trace_functions:
-                f(ray, side, diagnostics)
+                try:
+                    f(ray, side, diagnostics)
+                except NoIntersection as err:  # if the ray doesn't intersect...
+                    if pass_error:  # move on to next surface
+                        pass
+                    else:  # raise an exception
+                        err.ray = ray
+                        raise err
 
     def ray_trace_windows(self, ray: raytrace.Ray, x_stop=None, dx_extend=None, diagnostics=True):
         self.ray_trace_window(ray, 'left', diagnostics=diagnostics)
         self.ray_trace_window(ray, 'right', diagnostics=diagnostics)
+
         if x_stop is not None:
             ray.extend_to_x(x_stop)
         elif dx_extend is not None:
             ray.extend_dx(dx_extend)
 
-    def trace_ray_set(self, wavelength=None, n_rays=21, y_range=None, x_start=None, x_stop=None, dx_extend=None,
+    def trace_ray_set(self, wavelength: Union[float, int, Sequence] = None, n_rays=21, y_range=None, x_start=None, x_stop=None, dx_extend=None,
                       append=False, color='r', diagnostics=False, draw=True, arrow_size=10, inplace=True, marker='',
                       linestyle=None):
         if append and inplace:
@@ -219,10 +287,12 @@ class CurvedWall(object):
         ys_in = np.linspace(y_range[0], y_range[1], n_rays)
 
         if x_start is None:
-            x_start = self.x_min - 0.1 * np.abs(self.x_min)
+            x_start = self.default_x_start
+            # x_start = self.x_min - 0.1 * np.abs(self.x_min)
 
         if x_stop is None and dx_extend is None:
-            x_stop = self.x_max + 0.1 * np.abs(self.x_max)
+            x_stop = self.default_x_stop
+            # x_stop = self.x_max + 0.1 * np.abs(self.x_max)
 
         if not isinstance(wavelength, typing.Iterable):
             wavelength = [wavelength]
@@ -240,6 +310,15 @@ class CurvedWall(object):
                         for Pr in err.Prs:
                             plt.plot(Pr[0], Pr[1], 'or')
                         raise err
+                except NoIntersection as err:
+                    self.draw()
+                    err.draw_ray()
+                    raise err
+                except ValueError as err:
+                    pass
+                    # self.draw()
+                    # ray.draw()
+                    # raise err
 
                 if draw:
                     ray.draw(ls=linestyle, marker=marker, arrow_size=arrow_size)
@@ -253,6 +332,95 @@ class CurvedWall(object):
     def draw_rays(self, sets='all', c='r', ls='-', marker='', arrow_size=8):
         for ray in self.rays.rays_of_set(sets):
             ray.draw(c=c, ls=ls, marker=marker, arrow_size=arrow_size)
+
+    def check_fix_geometry(self):
+        pass
+
+    def set_parameter(self, p, name, preserve_power=True):
+        if name == 't1' or name == 't_1':
+            self._t_1 = p
+        else:
+            ValueError(f'Parameter name "{name}" invalid for window of type {type(self)}')
+
+    def set_parameters(self, parameter_names, parameter_values, preserve_power=True):
+        for name, val in zip(parameter_names, parameter_values):
+            self.set_parameter(name, val, preserve_power=preserve_power)
+
+    def get_parameter(self, name):
+        if name == 't1' or name == 't_1':
+            return self.t_1
+        else:
+            ValueError(f'Parameter name "{name}" invalid for window of type {type(self)}')
+
+    def get_parameters(self, parameter_names, as_array=True):
+        ps = [self.get_parameter(p) for p in parameter_names]
+        if as_array:
+            ps = np.array(ps)
+        return ps
+
+    def err(self, ps, diagnostics=False, n_rays=21, preserve_power=True):
+        parameters = self.optimization_parameters
+
+        self.set_parameters(parameters, ps, preserve_power=preserve_power)
+        # print_diag(f'Iteration {i[0]}', diagnostics)
+
+        rays = self.trace_ray_set(y_range=None, wavelength=self.design_wavelength, n_rays=n_rays,
+                                  draw=False, inplace=False)
+        error = {'rms_aberration': rays.rms_aberration(sets='all'),
+                 'max_aberration': rays.max_aberration(sets='all')}.get(self.optimization_metric, None)
+        if error is None:
+            raise ValueError(f'Invalid metric "{self.optimization_metric}" for "{type(self)}" optimization.' +
+                             'Argument must be one of "rms_aberration" or "max_aberration"')
+
+        print_diag([name + '=' + f'{p}' for name, p in zip(parameters, ps)] + [f'\t error = {error}'], diagnostics)
+
+        return error
+
+    def optimize_window(self, metric='rms_aberration', parameters=None, wavelength=None,
+                        bounds_dict=None, inplace=True, n_rays=21, y_range=None, ray_sets='success',
+                        preserve_power=True, status=False):
+
+        window = self.inplace(inplace)
+
+        if metric is None:
+            metric = window.optimization_metric
+        else:
+            window.optimization_metric = metric
+
+        if parameters is None:
+            parameters = window.default_optimization_parameters
+        else:
+            window.optimization_parameters = parameters
+
+        err = lambda ps: window.err(ps, diagnostics=status, n_rays=n_rays, preserve_power=preserve_power)
+
+        # default_bounds = {'Rm': (-1.8 / window.Y_max_o, 1.8 / window.Y_max_o),
+        #                   'Ro': (-1.8 / window.Y_max_o, 1.8 / window.Y_max_o)}
+
+        if bounds_dict is None:
+            bounds_dict = {}
+        if type(bounds_dict) is dict:
+            bounds = [bounds_dict.get(p, window.default_bounds.get(p, (None, None))) for p in parameters]
+        else:
+            raise ValueError(f'"bounds_dict" must be dictionary with keys in "parameters" or None')
+
+        if y_range is None:
+            y_range = self.default_Y_range
+
+        p0 = window.get_parameters(parameter_names=parameters, as_array=True)
+
+        print_diag(f'p0 =    \t{p0}\nbounds =\t{bounds}', status)
+        print_diag(f'error0 =\t{err(p0)}', status)
+
+        sln = minimize(err, p0, jac='2-point', bounds=bounds)
+
+        print_diag(f'Current error value:               {err(sln.x):3.2e}', status)
+        # print_diag(f'Minimum error during optimization: {min_error[0]:3.2e}', False)
+
+        window.set_parameters(parameters, sln.x)
+        window.trace_ray_set(wavelength=wavelength, n_rays=n_rays, y_range=y_range, draw=False, inplace=True)
+
+        return window, sln
 
 
 class Bispherical(CurvedWall):
@@ -282,16 +450,44 @@ class Bispherical(CurvedWall):
 
     @property
     def x_min(self):
-        return self.get_Qo('left')[0] - self.Ro
+        # return self.get_Qo('left')[0] - self.Ro
+        return -self.x_max
 
     @property
     def x_max(self):
-        return self.get_Qo('right')[0] + self.Ro
+        if self.Ro > 0:
+            return self.get_Qo('right')[0] + self.Ro
+        else:
+            return self.get_Qo('right')[0] - np.sqrt(self.Ro ** 2 - (self.h / 2) ** 2)
+
+    @property
+    def power(self):
+        return optical_power(self.Ri, self.Ro, self.t, self.n_1, self.n_o, self.n_i)
+
+    @property
+    def default_optimization_parameters(self):
+        return 't_1', 'power_1'
+
+    @property
+    def all_optimization_parameters(self):
+        return 'Ro', 't_1', 'power_1'
+
+    def set_parameter(self, p, name, preserve_power=True):
+        P0 = self.power
+        if name == 'Ro':
+            self._Ro = p
+        elif name == 't1' or name == 't_1':
+            self._t_1 = p
+            if preserve_power:
+                self.set_Ro_by_power(P0)
+        else:
+            ValueError(f'Parameter name "{name}" invalid for window of type {type(self)}')
 
     def print_dims(self, prefix=''):
-        print(prefix + f"Ri =\t{self.Ri:6.3f} cm")
-        print(prefix + f"Ro =\t{self.Ro:6.3f} cm")
-        print(prefix + f"t =\t{self.t_1:6.3f} cm")
+        print(prefix + f"Ri =\t{self.Ri:6.3f} {_length_unit}")
+        print(prefix + f"Ro =\t{self.Ro:6.3f} {_length_unit}")
+        print(prefix + f"t =\t{self.t_1:6.3f} {_length_unit}")
+        print(prefix + f"power =\t{self.power:4.3f} {_power_unit}")
 
     def get_Qo(self, side):
         Qo_right = self.Qi + np.array(
@@ -334,6 +530,14 @@ class Bispherical(CurvedWall):
         if dx < 0:
             self._t_1 += np.abs(dx)
 
+    def set_Ro_by_power(self, P: float):
+        """
+        Set the outer element radius as needed to be of a given optical power
+        :param P: float, optical power, 1/f
+        :return: None
+        """
+        self._Ro = Ro_specified_Power(P, self.Ri, self.t, self.n_1, self.n_o, self.n_i)
+
     @staticmethod
     def get_xy_m(_):
         # points on mid surface; undefined except for cemented doublets
@@ -361,13 +565,6 @@ class Bispherical(CurvedWall):
     def draw_rays(self, sets='all', c='r', ls='-', marker='', arrow_size=8):
         for ray in self.rays.rays_of_set(sets):
             ray.draw(c=c, ls=ls, marker=marker, arrow_size=arrow_size)
-
-    def check_fix_geometry(self):
-        xi, _ = self.get_xy_i(2)
-        xo, _ = self.get_xy_o(2)
-        dx = xo[0] - xi[0]
-        if dx < 0:
-            self._t_1 += np.abs(dx)
 
     @staticmethod
     def _draw_window(xi, yi, xo, yo, xm=None, ym=None, ls='-', c='k', lw=2):
@@ -490,7 +687,7 @@ class ZeroPowerSinglet(Bispherical):
 
 class CementedDoublet(Bispherical):
 
-    opt_params = ('Rm', 'Ro', 't_base', 't_crown')
+    # opt_params = ('Rm', 'Ro', 't_base', 't_crown')
 
     def __init__(self, Ri: float, Rm: float, Ro: float, h: float, t1: float, t2: float,
                  h_f: float = 0., wetted_material: str = 'fused silica', crown_material: str = 'bk7',
@@ -526,15 +723,90 @@ class CementedDoublet(Bispherical):
         else:
             return refractive_index(self.material_2, design_wavelengths)
 
-    def print_dims(self, prefix=''):
-        print(prefix + f"Ri =      {self.Ri:6.3f} cm")
-        print(prefix + f"Rm =      {self.Rm:6.3f} cm")
-        print(prefix + f"Ro =      {self.Ro:6.3f} cm")
-        print(prefix + f"t_base =  {self.t_1:6.3f} cm")
-        print(prefix + f"t_crown = {self.t_2:6.3f} cm")
+    @property
+    def power_1(self):
+        return optical_power(self.Ri, self.Rm, self.t_1, self.n_1, self.n_2, self.n_i)
 
-    # def opt_params(self):
-    #     return self._opt_params
+    @property
+    def power_2(self):
+        return optical_power(self.Rm, self.Ro, self.t_2, self.n_2, self.n_o, self.n_1)
+
+    @property
+    def power(self):
+        return None
+
+    @property
+    def optimization_metrics(self):
+        return 'rms_aberration', 'max_aberration'
+
+    @property
+    def optimization_metric(self):
+        return self._optimization_metric
+
+    @optimization_metric.setter
+    def optimization_metric(self, value):
+        if value in self.optimization_metrics:
+            self._optimization_metric = value
+        else:
+            raise ValueError(f'Metric must be one of "{self.optimization_metrics}"')
+
+    @property
+    def default_optimization_parameters(self):
+        return 't_1', 't_2', 'power_1', 'power_2'
+
+    @property
+    def all_optimization_parameters(self):
+        return 'Rm', 'Ro', 't_1', 't_2', 'power_1', 'power_2'
+
+    def set_parameter(self, name, p, preserve_power=True, check_geometry=True):
+        P1, P2 = self.power_1, self.power_2
+        if name == 'Rm':
+            self._Rm = p
+        elif name == 'Ro':
+            self._Ro = p
+        elif name == 't1' or name == 't_1':
+            self._t_1 = p
+            if preserve_power:
+                self.set_Rm_by_power_1(P1)
+                self.set_Ro_by_power_2(P2)
+        elif name == 't2' or name == 't_2':
+            self._t_2 = p
+            if preserve_power:
+                self.set_Ro_by_power_2(P2)
+        elif name == 'P1' or name == 'power_1':
+            self.set_Rm_by_power_1(p)
+            if preserve_power:
+                self.set_Ro_by_power_2(P2)
+        elif name == 'P2' or name == 'power_2':
+            self.set_Ro_by_power_2(p)
+        else:
+            ValueError(f'Parameter name "{name}" invalid for window of type {type(self)}')
+        self.check_fix_geometry()
+
+    def get_parameter(self, name):
+        if name == 'Rm':
+            return self.Rm
+        elif name == 'Ro':
+            return self.Ro
+        elif name == 't1' or name == 't_1':
+            return self.t_1
+        elif name == 't2' or name == 't_2':
+            return self.t_2
+        elif name == 'P1' or name == 'power_1':
+            return self.power_1
+        elif name == 'P2' or name == 'power_2':
+            return self.power_2
+        else:
+            ValueError(f'Parameter name "{name}" invalid for window of type {type(self)}')
+
+    def print_dims(self, prefix=''):
+        print(prefix + f"Ri =      {self.Ri:6.3f} {_length_unit}")
+        print(prefix + f"Rm =      {self.Rm:6.3f} {_length_unit}")
+        print(prefix + f"Ro =      {self.Ro:6.3f} {_length_unit}")
+        print(prefix + f"t_base =  {self.t_1:6.3f} {_length_unit}")
+        print(prefix + f"t_crown = {self.t_2:6.3f} {_length_unit}")
+        print(prefix + f"power_base =  {self.power_1:4.3f} {_power_unit}")
+        print(prefix + f"power_crown = {self.power_2:4.3f} {_power_unit}")
 
     def get_n2(self, wavelength=None):
         if wavelength is None:
@@ -599,85 +871,14 @@ class CementedDoublet(Bispherical):
                 ray.refract_plane(x, n2, Y_max=self.Y_max_o, inplace=True)
         pass
 
-    def optimize_window(self, metric='rms_aberration', which=4 * (True,), wavelength=None, inplace=True,
-                        n_rays=11, y_range=None, t1_bounds=None, t2_bounds=None, ray_sets='success'):
-
-        err = None
-        window = self.inplace(inplace)
-        which = np.array(which, dtype=np.bool)
-        print_diag(which, False)
-
-        '''
-        Define the optimization (error) function based on array 'p' of parameters, where:
-            p[0] = 1 / Rm  # curvature of mid surface to provide continuity between positive and negative values
-            p[1] = Ro  # outer surface radius
-            p[2] = t1  # wetted element thickness
-            p[3] = t2  # outer element thickness
-        '''
-
-        def set_params(window_, p):
-            i = 0
-            if which[0]:
-                if p[i] != 0:
-                    window_._Rm = 2 / p[i]
-                else:
-                    window_._Rm = np.inf
-                i += 1
-            if which[1]:
-                window_._Ro = p[i]
-                i += 1
-            if which[2]:
-                window_._t_1 = p[i]
-                i += 1
-            if which[3]:
-                window_._t_2 = p[i]
-            try:
-                self.check_fix_geometry()
-            except ValueError:
-                print(self.Rm, self.h)
-                raise Exception()
-
-        if y_range is None:
-            y_range = self.default_Y_range
-
-        if metric == 'rms_aberration':
-            def err(p):
-                set_params(window, p)
-                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
-                                            draw=False, inplace=False)
-                return rays.rms_aberration(sets=ray_sets)
-
-        elif metric == 'max_aberration':
-            def err(p):
-                print_diag(p[0], False)
-                set_params(window, p)
-                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
-                                            draw=False, inplace=False)
-                return np.max(np.abs(rays.aberrations(sets=ray_sets)))
-
-        else:
-            ValueError(f"'metric' argument must be one of 'rms_aberration' or 'max_aberration'.")
-
-        if t1_bounds is None:
-            t1_bounds = (0.03 * self.h, 0.5 * self.h)
-        if t2_bounds is None:
-            t2_bounds = (0.03 * self.h, 0.5 * self.h)
-
-        p0 = np.array([2 / window.Rm, window.Ro, window.t_1, window.t_2])[which]
-        bounds = [bnd for bnd, w in zip([(-1.8 / self.Y_max_o, 1.8 / self.Y_max_o), (self.Y_max_o, None),
-                                         t1_bounds, t2_bounds], which) if w]
-
-        print_diag(f'p0 =    \t{p0}\nbounds =\t{bounds}', False)
-        print_diag(f'error0 =\t{err(p=p0)}', False)
-
-        sln = minimize(err, p0, jac='2-point', bounds=bounds)
-
-        set_params(window, sln.x)
-        window.trace_ray_set(wavelength=wavelength, n_rays=n_rays, y_range=y_range, draw=False, inplace=True)
-
-        return window
-
     def check_fix_geometry(self):
+        f_rad = 1.2
+        # first, check for valid radii
+        if np.abs(self.Rm) < self.h / 2:
+            self._Rm = f_rad * self.h / 2 * np.sign(self.Rm)
+        if np.abs(self.Ro) < self.h / 2:
+            self._Ro = f_rad * self.h / 2 * np.sign(self.Ro)
+        # then, check valid thicknesses
         xi, _ = self.get_xy_i(2)
         xm, _ = self.get_xy_m(2)
         xo, _ = self.get_xy_o(2)
@@ -688,6 +889,25 @@ class CementedDoublet(Bispherical):
         if dx2 < 0:
             self._t_2 += np.abs(dx2)
 
+    def set_Rm_by_power_1(self, P: float):
+        """
+        Set the outer element radius as needed to be of a given optical power
+        :param P: float, optical power, 1/f
+        :return: None
+        """
+        self._Ro = Ro_specified_Power(P, self.Ri, self.t_1, self.n_1, self.n_2, self.n_i)
+
+    def set_Ro_by_power_2(self, P: float):
+        """
+        Set the outer element radius as needed to be of a given optical power
+        :param P: float, optical power, 1/f
+        :return: None
+        """
+        self._Ro = Ro_specified_Power(P, self.Rm, self.t_2, self.n_2, self.n_o, self.n_1)
+
+    def set_Ro_by_power(self, P: float):
+        raise NotImplementedError('"set_Ro_by_power" not implemented for doublet windows. ' +
+                                  'See "set_Rm_by_power_1" and "set_Ro_by_power_2" instead.')
 
 class BisphericalLens(Bispherical):
     def __init__(self, Ri: float, Ro: float, h: float, t: float, xi: float,
@@ -732,6 +952,10 @@ class BisphericalLens(Bispherical):
         n1 = self.get_n1(ray.wavelength)
         if side not in ['left', 'right']:
             raise ValueError('"side" must be one of "left" or "right"')
+        elif self.Ri == np.inf:
+            n_new, sign = {'left': (self.n_o, -1), 'right': (self.n_1, 1)}[side]
+            x = sign * (self.xi + self.Ri)
+            ray.refract_plane(x, n_new, Y_max=self.Y_max_i)
         elif side == 'left':
             ray.refract_circle(self.Ri, self.get_Qi(side), self.n_o, Y_max=self.Y_max_i, diagnostics=diagnostics)
         elif side == 'right':
@@ -788,11 +1012,7 @@ class AirspaceDoublet(CurvedWall):
 
     def __init__(self, window: CurvedWall, lens: BisphericalLens,
                  design_wavelength: typing.Union[float, typing.Iterable] = None):
-        # , Ri: float, Rm: float, Ro: float, h: float, t1: float, t2: float,
-        #  h_f: float = 0., wetted_material: str = 'fused silica', crown_material: str = 'bk7',
-        #  design_wavelength: typing.Union[float, typing.Iterable] = 532, n_o: float = None, n_i: float = None,
-        #  draw=False, trace=True, n_rays=21, ray_y_range=None, x_start=None,
-        #  x_stop=None, dx_extend=None, draw_rays=False):
+
         if design_wavelength is None:
             design_wavelength = window.design_wavelength
         window._design_wavelength = design_wavelength
@@ -800,15 +1020,6 @@ class AirspaceDoublet(CurvedWall):
         super().__init__(0., 0., 0., 0., design_wavelength=design_wavelength)
         self._window = window
         self._lens = lens
-
-        # self._Rm = float(Rm)
-        # self._t_2 = float(t2)
-        # self._material_2 = crown_material
-        #
-        # super().__init__(Ri=Ri, Ro=Ro, h=h, t=t1, h_f=h_f, material=wetted_material,
-        #                  design_wavelength=design_wavelength,
-        #                  n_o=n_o, n_i=n_i, draw=draw, trace=trace, n_rays=n_rays, ray_y_range=ray_y_range,
-        #                  x_start=x_start, x_stop=x_stop, dx_extend=dx_extend, draw_rays=draw_rays)
 
     @property
     def window(self):
@@ -839,6 +1050,73 @@ class AirspaceDoublet(CurvedWall):
         self.ray_trace_window(ray, 'right')
         return ray.Pr[1]
 
+    @property
+    def default_bounds(self):
+        return {'Ri_lens': (-1.8 / self.lens.Y_max_i, 1.8 / self.lens.Y_max_i),
+                'Ro_lens': (-1.8 / self.lens.Y_max_o, 1.8 / self.lens.Y_max_o),
+                't_window': {self.window.h / 20., None},
+                't_lens': (self.lens.h / 20., None),
+                'x_air': (self.window.t_1 / 10, None)}
+
+    @property
+    def optimization_metrics(self):
+        return 'rms_aberration', 'max_aberration'
+
+    @property
+    def optimization_metric(self):
+        return self._optimization_metric
+
+    @optimization_metric.setter
+    def optimization_metric(self, value):
+        if value in self.optimization_metrics:
+            self._optimization_metric = value
+        else:
+            raise ValueError(f'Metric must be one of "{self.optimization_metrics}"')
+
+    @property
+    def default_optimization_parameters(self):
+        return 't_lens', 'Ri_lens', 'power_lens', 'x_air'
+
+    @property
+    def all_optimization_parameters(self):
+        return 't_window', 't_lens', 'Ri_lens', 'Ro_lens', 'x_air', 'power_lens'
+
+    def set_parameter(self, name, p, preserve_power=True, check_geometry=True):
+        P_lens = self.lens.power
+        if name == 't_window':
+            self.window._t_1 = p
+        elif name == 't_lens':
+            self.lens._t_1 = p
+            if preserve_power:
+                self.lens.set_Ro_by_power(P=P_lens)
+        elif name == 'Ri_lens':
+            self._Ri = p
+        elif name == 'Ro_lens':
+            self.lens._Ro = p
+        elif name == 'x_air':
+            self.lens._xi = p + self.window.x_max
+        elif name == 'P_lens' or name == 'power_lens':
+            self.lens.set_Ro_by_power(p)
+        else:
+            ValueError(f'Parameter name "{name}" invalid for window of type {type(self)}')
+        self.check_fix_geometry()
+
+    def get_parameter(self, name):
+        if name == 't_window':
+            return self.window.t_1
+        elif name == 't_lens':
+            return self.lens.t
+        elif name == 'Ri_lens':
+            return self.lens.Ri
+        elif name == 'Ro_lens':
+            return self.lens.Ro
+        elif name == 'x_air':
+            return self.x_airgap
+        elif name == 'P_lens' or name == 'power_lens':
+            return self.lens.power
+        else:
+            ValueError(f'Parameter name "{name}" invalid for window of type {type(self)}')
+
     def draw(self, which='both', n_pts=100, center_circle=True, ls='-', c='k', lw=2, new_figure=True, figsize=(10, 5)):
 
         self.lens.draw(which=which, n_pts=n_pts, center_circle=False, ls=ls, c=c, lw=lw, new_figure=new_figure,
@@ -860,102 +1138,127 @@ class AirspaceDoublet(CurvedWall):
         self.window.print_dims(prefix)
         print_md(f'_{str(type(self.lens)).split(".")[-1][:-2].split("Lens")[0]} Lens:_')
         self.lens.print_dims(prefix)
-        print('\n' + f'x_airgap =\t{self.x_airgap:6.3f} cm')
+        print('\n' + f'x_airgap =\t{self.x_airgap:6.3f} {_length_unit}')
 
-    # def print_dims(self):
-    #     print(f"Ri =      {self.Ri:6.3f} cm")
-    #     print(f"Rm =      {self.Rm:6.3f} cm")
-    #     print(f"Ro =      {self.Ro:6.3f} cm")
-    #     print(f"t_base =  {self.t_1:6.3f} cm")
-    #     print(f"t_crown = {self.t_2:6.3f} cm")
-
-
-
-    def optimize(self, metric='rms_aberration', which=4 * (True,), wavelength=None, inplace=True,
-                 n_rays=11, y_range=None, t1_bounds=None, t2_bounds=None, ray_sets='success'):
-
-        err = None
-        window = self.inplace(inplace)
-        which = np.array(which, dtype=np.bool)
-        print_diag(which, False)
-
-        '''
-        Define the optimization (error) function based on array 'p' of parameters, where:
-            p[0] = 1 / Rm  # curvature of mid surface to provide continuity between positive and negative values
-            p[1] = Ro  # outer surface radius
-            p[2] = t1  # wetted element thickness
-            p[3] = t2  # outer element thickness
-        '''
-
-        def set_params(window_, p):
-            i = 0
-            if which[0]:
-                if p[i] != 0:
-                    window_._Rm = 2 / p[i]
-                else:
-                    window_._Rm = np.inf
-                i += 1
-            if which[1]:
-                window_._Ro = p[i]
-                i += 1
-            if which[2]:
-                window_._t_1 = p[i]
-                i += 1
-            if which[3]:
-                window_._t_2 = p[i]
-            try:
-                self.check_fix_geometry()
-            except ValueError:
-                print(self.Rm, self.h)
-                raise Exception()
-
-        if y_range is None:
-            y_range = self.default_Y_range
-
-        if metric == 'rms_aberration':
-            def err(p):
-                set_params(window, p)
-                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
-                                            draw=False, inplace=False)
-                return rays.rms_aberration(sets=ray_sets)
-
-        elif metric == 'max_aberration':
-            def err(p):
-                print_diag(p[0], False)
-                set_params(window, p)
-                rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
-                                            draw=False, inplace=False)
-                return np.max(np.abs(rays.aberrations(sets=ray_sets)))
-
-        else:
-            ValueError(f"'metric' argument must be one of 'rms_aberration' or 'max_aberration'.")
-
-        if t1_bounds is None:
-            t1_bounds = (0.03 * self.h, 0.5 * self.h)
-        if t2_bounds is None:
-            t2_bounds = (0.03 * self.h, 0.5 * self.h)
-
-        p0 = np.array([2 / window.Rm, window.Ro, window.t_1, window.t_2])[which]
-        bounds = [bnd for bnd, w in zip([(-1.8 / self.Y_max_o, 1.8 / self.Y_max_o), (self.Y_max_o, None),
-                                         t1_bounds, t2_bounds], which) if w]
-
-        print_diag(f'p0 =    \t{p0}\nbounds =\t{bounds}', False)
-        print_diag(f'error0 =\t{err(p=p0)}', False)
-
-        sln = minimize(err, p0, jac='2-point', bounds=bounds)
-
-        set_params(window, sln.x)
-        window.trace_ray_set(wavelength=wavelength, n_rays=n_rays, y_range=y_range, draw=False, inplace=True)
-
-        return window
+    # def optimize(self, metric='rms_aberration', which=4 * (True,), wavelength=None, inplace=True,
+    #              n_rays=11, y_range=None, t1_bounds=None, t2_bounds=None, ray_sets='success'):
+    #
+    #     err = None
+    #     window = self.inplace(inplace)
+    #     which = np.array(which, dtype=np.bool)
+    #     print_diag(which, False)
+    #
+    #     '''
+    #     Define the optimization (error) function based on array 'p' of parameters, where:
+    #         p[0] = 1 / Rm  # curvature of mid surface to provide continuity between positive and negative values
+    #         p[1] = Ro  # outer surface radius
+    #         p[2] = t1  # wetted element thickness
+    #         p[3] = t2  # outer element thickness
+    #     '''
+    #
+    #     def set_params(window_, p):
+    #         i = 0
+    #         if which[0]:
+    #             if p[i] != 0:
+    #                 window_._Rm = 2 / p[i]
+    #             else:
+    #                 window_._Rm = np.inf
+    #             i += 1
+    #         if which[1]:
+    #             window_._Ro = p[i]
+    #             i += 1
+    #         if which[2]:
+    #             window_._t_1 = p[i]
+    #             i += 1
+    #         if which[3]:
+    #             window_._t_2 = p[i]
+    #         try:
+    #             self.check_fix_geometry()
+    #         except ValueError:
+    #             print(self.Rm, self.h)
+    #             raise Exception()
+    #
+    #     if y_range is None:
+    #         y_range = self.default_Y_range
+    #
+    #     if metric == 'rms_aberration':
+    #         def err(p):
+    #             set_params(window, p)
+    #             rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+    #                                         draw=False, inplace=False)
+    #             return rays.rms_aberration(sets=ray_sets)
+    #
+    #     elif metric == 'max_aberration':
+    #         def err(p):
+    #             print_diag(p[0], False)
+    #             set_params(window, p)
+    #             rays = window.trace_ray_set(y_range=y_range, wavelength=wavelength, n_rays=n_rays,
+    #                                         draw=False, inplace=False)
+    #             return np.max(np.abs(rays.aberrations(sets=ray_sets)))
+    #
+    #     else:
+    #         ValueError(f"'metric' argument must be one of 'rms_aberration' or 'max_aberration'.")
+    #
+    #     if t1_bounds is None:
+    #         t1_bounds = (0.03 * self.h, 0.5 * self.h)
+    #     if t2_bounds is None:
+    #         t2_bounds = (0.03 * self.h, 0.5 * self.h)
+    #
+    #     p0 = np.array([2 / window.Rm, window.Ro, window.t_1, window.t_2])[which]
+    #     bounds = [bnd for bnd, w in zip([(-1.8 / self.Y_max_o, 1.8 / self.Y_max_o), (self.Y_max_o, None),
+    #                                      t1_bounds, t2_bounds], which) if w]
+    #
+    #     print_diag(f'p0 =    \t{p0}\nbounds =\t{bounds}', False)
+    #     print_diag(f'error0 =\t{err(p=p0)}', False)
+    #
+    #     sln = minimize(err, p0, jac='2-point', bounds=bounds)
+    #
+    #     set_params(window, sln.x)
+    #     window.trace_ray_set(wavelength=wavelength, n_rays=n_rays, y_range=y_range, draw=False, inplace=True)
+    #
+    #     return window
 
     def check_fix_geometry(self):
-        xi, _ = self.get_xy_i(2)
-        xm, _ = self.get_xy_m(2)
-        xo, _ = self.get_xy_o(2)
-        dx1 = xm[0] - xi[0]
-        dx2 = xo[0] - xm[0]
-        if dx1 < 0:
-            self._t_1 += np.abs(dx1)
-        if dx2 < 0:
-            self._t_2 += np.abs(dx2)
+        self.window.check_fix_geometry()
+        self.lens.check_fix_geometry()
+
+
+def singlet_Ro_analytical(Ri: float, t: float, n1: float,
+                          n_i: float = 1., n_o: float = 1.):
+    """
+    Calculate the required outer window radius for a fixed inner radius and specified thickness and refractive index
+    :param t: center thickness
+    :return:
+    """
+    # return (n1 - 1) * (n1 * Ri - (n_o - n1) * t) / ((n1 - n_o) * n1)  # Vikram form
+    return Ri * ((n1 - n_o) / (n1 - n_i)) * (n1 * Ri + (n1 - n_i) * t) / (n1 * Ri)
+
+
+def optical_power(Ri: float, Ro: float, t: float, n: float, no: float = 1, ni: float = 1) -> float:
+    """
+    Calculate the optical power of a singlet element
+    :param Ri: float, inner radius
+    :param Ro: float, outer radius
+    :param t: float, thickness
+    :param n: float, element refractive index
+    :param no: float, outer medium refractive index
+    :param ni: float, inner medium refractive index
+    :return: float
+    """
+    return ((n - no) / Ro + (ni - n) / Ri - (n - no) * (ni - n) * t / (n * Ri * Ro)) * power_mult()
+
+
+def Ro_specified_Power(P: float, Ri: float, t: float, n: float, no: float = 1, ni: float = 1) -> float:
+    """
+    Calculates the outer radius of an optical element required to achieve a given optical power
+    :param P: float, optical power, P = 1/f
+    :param Ri: float, inner radius
+    :param t: float, element thickness
+    :param n: float, element refractive index
+    :param no: float, outside medium refractive index
+    :param ni: float, inside medium refractive index
+    :return: Ro, float
+    """
+    P = P / power_mult()
+
+    return ((n-no)*n*Ri + (n-no)*(n-ni)*t) / (n*(P*Ri+n-ni))
