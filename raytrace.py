@@ -4,7 +4,7 @@ import copy
 import numpy as np
 import matplotlib.pyplot as plt
 
-from utilities import print_diag, IntersectionExceedsBounds, NegativeIntersectionDistances
+from utilities import print_diag, IntersectionExceedsBounds, NegativeIntersectionDistances, NoIntersection
 
 
 class Ray(object):
@@ -217,7 +217,7 @@ def _spherical_intersection(Pr, Vr, Q, R, Y_max=None, tol=1e-3):
     # determine if a solution exists
     disc = b**2 - 4 * a * c
     if disc < 0:
-        raise Exception("Line does not intersect the circle")
+        raise NoIntersection("Line does not intersect the circle", Pr=Pr, Vr=Vr)
 
     # try:  # TODO: delete old troubleshooting code
     #     if disc < 0:

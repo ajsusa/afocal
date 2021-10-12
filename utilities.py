@@ -61,6 +61,25 @@ class NegativeIntersectionDistances(Exception):
         self.Prs = Prs
 
 
+class NoIntersection(Exception):
+    def __init__(self, message, Pr=(), Vr=(), ray=None):
+        self.message = message
+        self.Pr = Pr
+        self.Vr = Vr
+        self.ray = ray
+
+    def draw_ray(self):
+        if self.ray is not None:
+            self.ray.draw(c='r', lw=2, marker='.')
+        xlim, ylim = plt.xlim(), plt.ylim()
+        dx = self.Pr[0] - np.array(xlim)
+        ys = self.Pr[1] + dx * self.Vr[1] / self.Vr[0]
+        plt.plot(xlim, ys, c='r', ls='--', lw=1.5)
+        plt.plot(self.Pr[0], self.Pr[1], 'or', mew=1.5, mfc='w')
+        plt.xlim(xlim)
+        plt.ylim(ylim)
+
+
 def plot_aberrations(rays, unit='rad', failed=True, new_fig=True, c=None, mfc=None, ls=':', prefix='', yloc='in',
                      flip_axes=False):
     from windows import CurvedWall
