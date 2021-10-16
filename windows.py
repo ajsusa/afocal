@@ -148,6 +148,10 @@ class CurvedWall(object):
         return ray.Pr[1]
 
     @property
+    def estimated_magnification(self):
+        return self.estimated_Y_max_in / (self.h / 2. - self.h_f)
+
+    @property
     def default_Y_range(self):
         y0 = self.estimated_Y_max_in
         return -y0, y0
@@ -909,6 +913,7 @@ class CementedDoublet(Bispherical):
         raise NotImplementedError('"set_Ro_by_power" not implemented for doublet windows. ' +
                                   'See "set_Rm_by_power_1" and "set_Ro_by_power_2" instead.')
 
+
 class BisphericalLens(Bispherical):
     def __init__(self, Ri: float, Ro: float, h: float, t: float, xi: float,
                  h_f: float = 0., material: str = 'fused silica',
@@ -1049,6 +1054,10 @@ class AirspaceDoublet(CurvedWall):
         ray = raytrace.Ray([0, self.window.h / 2. - self.window.h_f], wave, self.window.n_i)
         self.ray_trace_window(ray, 'right')
         return ray.Pr[1]
+
+    @property
+    def estimated_magnification(self):
+        return self.estimated_Y_max_in / (self.window.h / 2. - self.window.h_f)
 
     @property
     def default_bounds(self):
